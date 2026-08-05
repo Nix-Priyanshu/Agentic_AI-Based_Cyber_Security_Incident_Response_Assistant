@@ -17,24 +17,26 @@ from datetime import datetime
 
 import streamlit as st
 
-# LangChain imports (kept simple, as per project scope)
+# LangChain
 from langchain_core.prompts import PromptTemplate
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 
-# LLM + Embeddings providers
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+# LLM Providers
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    GoogleGenerativeAIEmbeddings,
+)
 from langchain_groq import ChatGroq
 
-# ReportLab for PDF report generation
+# PDF Generation
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib import colors
-
 
 # ---------------------------------------------------------
 # PAGE CONFIG
