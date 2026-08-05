@@ -18,7 +18,7 @@ from datetime import datetime
 import streamlit as st
 
 # LangChain imports (kept simple, as per project scope)
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
