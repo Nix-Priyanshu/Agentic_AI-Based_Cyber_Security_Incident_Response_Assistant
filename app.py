@@ -9,10 +9,13 @@ for this capstone.
 
 #========LOAD MODULES====================
 import os
+import re
 import tempfile
+from collections import Counter
 from datetime import datetime
 from io import BytesIO
 
+import pandas as pd
 import streamlit as st
 
 # ---- Modern LangChain building blocks (no deprecated APIs) ----
@@ -49,28 +52,39 @@ st.set_page_config(
 # Central place that maps a parsed "Severity" string to a visual
 # threat level used across the dashboard, status bar and badges.
 THREAT_LEVELS = {
-    "CRITICAL": {"emoji": "🔴", "label": "CRITICAL THREAT", "css": "tl-critical", "order": 4},
-    "HIGH":     {"emoji": "🟠", "label": "HIGH THREAT",     "css": "tl-high",     "order": 3},
-    "MEDIUM":   {"emoji": "🟡", "label": "MEDIUM THREAT",   "css": "tl-medium",   "order": 2},
-    "LOW":      {"emoji": "🔵", "label": "LOW THREAT",      "css": "tl-low",      "order": 1},
-    "SAFE":     {"emoji": "🟢", "label": "SYSTEM SAFE",     "css": "tl-safe",     "order": 0},
+    "CRITICAL":  {"emoji": "🔴", "label": "CRITICAL THREAT",   "css": "tl-critical",  "order": 5},
+    "HIGH":      {"emoji": "🟠", "label": "HIGH THREAT",       "css": "tl-high",      "order": 4},
+    "MEDIUM":    {"emoji": "🟡", "label": "MEDIUM THREAT",     "css": "tl-medium",    "order": 3},
+    "LOW":       {"emoji": "🔵", "label": "LOW THREAT",        "css": "tl-low",       "order": 2},
+    "SAFE":      {"emoji": "🟢", "label": "SYSTEM SAFE",       "css": "tl-safe",      "order": 1},
+    "UNSCANNED": {"emoji": "⚪", "label": "NOT YET SCANNED",   "css": "tl-unscanned", "order": 0},
 }
 
 
 def detect_threat_level(severity_text: str) -> str:
-    """Maps free-text severity (from the LLM report) to a THREAT_LEVELS key."""
-    if not severity_text:
-        return "SAFE"
+    """
+    Maps free-text severity (from the LLM report) to a THREAT_LEVELS key.
+    Never silently claims "SAFE" - that label is only used when the LLM
+    text explicitly says so (e.g. "no incident", "no risk"). Anything the
+    parser can't confidently classify falls back to MEDIUM so it gets a
+    human's attention instead of being hidden as green/safe.
+    """
+    if not severity_text or not severity_text.strip():
+        return "UNSCANNED"
     text = severity_text.lower()
     if "critical" in text:
         return "CRITICAL"
     if "high" in text:
         return "HIGH"
-    if "medium" in text:
+    if "medium" in text or "moderate" in text:
         return "MEDIUM"
     if "low" in text:
         return "LOW"
-    return "SAFE"
+    if any(phrase in text for phrase in ("no incident", "no risk", "no threat", "not malicious", "benign")):
+        return "SAFE"
+    # Ambiguous / unrecognized wording - flag for manual review rather than
+    # defaulting to "safe".
+    return "MEDIUM"
 
 
 #========SESSION STATE (APP MEMORY)====================
@@ -85,7 +99,8 @@ defaults = {
     "analysis_history": [],      # list of dicts: {time, attack_type, severity, summary}
     "kb_last_updated": None,     # datetime the knowledge base was last (re)built
     "kb_chunk_count": 0,         # number of chunks currently indexed
-    "threat_level": "SAFE",      # current overall THREAT_LEVELS key
+    "threat_level": "UNSCANNED", # current overall THREAT_LEVELS key
+    "iocs": {},                  # live indicators extracted from the knowledge base text
 }
 for key, value in defaults.items():
     if key not in st.session_state:
@@ -121,6 +136,7 @@ def inject_custom_css():
             width: 100%;
             box-sizing: border-box;
         }
+        .tl-unscanned{ background: rgba(255,255,255,0.06); color: #b8c2cc; }
         .tl-safe     { background: rgba(31,143,90,0.18);  color: #7CE0B0; }
         .tl-low      { background: rgba(45,116,182,0.20); color: #8ecae6; }
         .tl-medium   { background: rgba(196,138,20,0.22); color: #ffd166; }
@@ -367,6 +383,60 @@ def get_context(retriever, query):
     """
     docs = retriever.invoke(query)
     return "\n\n".join(doc.page_content for doc in docs)
+
+
+#========LIVE THREAT INDICATOR EXTRACTION (REGEX, NO API CALLS)====================
+# Pulls real, analyst-relevant indicators of compromise straight out of the
+# uploaded knowledge base text - IPs, domains/URLs, emails, file hashes,
+# CVE IDs and referenced ports. This runs locally (no LLM call, instant,
+# free) every time the knowledge base is (re)built, so the dashboard
+# reflects the *actual* data the analyst just loaded rather than a static
+# document count.
+
+_IP_REGEX = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b")
+_URL_REGEX = re.compile(r"https?://[^\s\"'<>\)\]]+")
+_EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_HASH_REGEX = re.compile(r"\b[a-fA-F0-9]{64}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{32}\b")
+_CVE_REGEX = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
+_PORT_REGEX = re.compile(r"\bport[:\s]+(\d{1,5})\b", re.IGNORECASE)
+
+
+def is_private_ip(ip: str) -> bool:
+    """Flags RFC1918 / loopback ranges as internal; everything else is external."""
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        o = [int(p) for p in parts]
+    except ValueError:
+        return False
+    if o[0] == 10:
+        return True
+    if o[0] == 172 and 16 <= o[1] <= 31:
+        return True
+    if o[0] == 192 and o[1] == 168:
+        return True
+    if o[0] == 127:
+        return True
+    return False
+
+
+def extract_iocs(text: str) -> dict:
+    """Scans raw knowledge-base text and returns Counters of real indicators found."""
+    ip_counter = Counter(_IP_REGEX.findall(text))
+    external_ips = {ip for ip in ip_counter if not is_private_ip(ip)}
+    internal_ips = {ip for ip in ip_counter if is_private_ip(ip)}
+
+    return {
+        "ip_counter": ip_counter,
+        "external_ips": external_ips,
+        "internal_ips": internal_ips,
+        "url_counter": Counter(_URL_REGEX.findall(text)),
+        "email_counter": Counter(_EMAIL_REGEX.findall(text)),
+        "hash_counter": Counter(_HASH_REGEX.findall(text)),
+        "cve_counter": Counter(m.upper() for m in _CVE_REGEX.findall(text)),
+        "port_counter": Counter(_PORT_REGEX.findall(text)),
+    }
 
 
 #========LLM FUNCTION====================
@@ -666,12 +736,66 @@ with tab_dashboard:
                 st.caption(f"🕒 Last updated: {st.session_state.kb_last_updated.strftime('%d %b %Y, %H:%M')}")
 
     st.divider()
+    st.markdown("**🛰️ Live Threat Telemetry** _(extracted directly from your knowledge base — no extra API calls)_")
+
+    iocs = st.session_state.iocs
+    if not iocs or not iocs.get("ip_counter") and not iocs.get("cve_counter") and not iocs.get("hash_counter"):
+        st.caption("No network indicators (IPs, CVEs, hashes, domains) detected in the current knowledge base yet.")
+    else:
+        t1, t2, t3, t4, t5 = st.columns(5)
+        with t1:
+            render_metric_box("Unique IPs", len(iocs["ip_counter"]))
+        with t2:
+            render_metric_box("External IPs", len(iocs["external_ips"]))
+        with t3:
+            render_metric_box("File Hashes", len(iocs["hash_counter"]))
+        with t4:
+            render_metric_box("CVEs Referenced", len(iocs["cve_counter"]))
+        with t5:
+            render_metric_box("Domains / URLs", len(iocs["url_counter"]))
+
+        st.write("")
+        ip_col, ioc_col = st.columns([1.3, 1])
+
+        with ip_col:
+            st.markdown("**Top IP Addresses (by mentions in the knowledge base)**")
+            top_ips = iocs["ip_counter"].most_common(10)
+            if top_ips:
+                df_ips = pd.DataFrame(top_ips, columns=["IP Address", "Mentions"])
+                df_ips["Scope"] = df_ips["IP Address"].apply(
+                    lambda ip: "🌐 External" if ip in iocs["external_ips"] else "🏠 Internal"
+                )
+                st.dataframe(df_ips, hide_index=True, use_container_width=True)
+                st.bar_chart(df_ips.set_index("IP Address")["Mentions"])
+            else:
+                st.caption("No IP addresses found in the knowledge base text.")
+
+        with ioc_col:
+            st.markdown("**CVEs Referenced**")
+            if iocs["cve_counter"]:
+                for cve, count in iocs["cve_counter"].most_common(8):
+                    st.markdown(f"- 🧬 `{cve}` — {count}x")
+            else:
+                st.caption("No CVE identifiers found.")
+
+            st.markdown("**File Hashes (potential IOCs)**")
+            if iocs["hash_counter"]:
+                for h, _ in list(iocs["hash_counter"].items())[:5]:
+                    st.code(h, language=None)
+            else:
+                st.caption("No file hashes found.")
+
+            if iocs["port_counter"]:
+                st.markdown("**Ports Referenced**")
+                st.write(", ".join(f"`{p}`" for p, _ in iocs["port_counter"].most_common(10)))
+
+    st.divider()
     st.markdown("**🕘 Recent Incident Analyses**")
     if not st.session_state.analysis_history:
         st.caption("Nothing analyzed yet. Run an analysis from the 🔍 Incident Analysis tab.")
     else:
         for entry in reversed(st.session_state.analysis_history[-8:]):
-            level = THREAT_LEVELS.get(entry["level"], THREAT_LEVELS["SAFE"])
+            level = THREAT_LEVELS.get(entry["level"], THREAT_LEVELS["UNSCANNED"])
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 with c1:
@@ -843,13 +967,23 @@ with tab_kb:
                 vector_store = build_vector_store(chunks, embedding_key)
                 retriever = get_retriever(vector_store, top_k)
 
+                # Extract real IOCs (IPs, domains, hashes, CVEs...) locally -
+                # no LLM call needed, so this is instant and free.
+                full_text = "\n".join(doc.page_content for doc in documents)
+                iocs = extract_iocs(full_text)
+
                 st.session_state.vector_store = vector_store
                 st.session_state.retriever = retriever
                 st.session_state.uploaded_file_names = [f.name for f in uploaded_files]
                 st.session_state.kb_chunk_count = len(chunks)
                 st.session_state.kb_last_updated = datetime.now()
+                st.session_state.iocs = iocs
 
-            st.success(f"✅ Knowledge base built from {len(uploaded_files)} file(s) — {len(chunks)} chunks indexed.")
+            st.success(
+                f"✅ Knowledge base built from {len(uploaded_files)} file(s) — {len(chunks)} chunks indexed. "
+                f"Detected {len(iocs['ip_counter'])} unique IP(s), {len(iocs['cve_counter'])} CVE(s), "
+                f"{len(iocs['hash_counter'])} file hash(es)."
+            )
 
     st.divider()
     st.markdown("**Current Knowledge Base**")
