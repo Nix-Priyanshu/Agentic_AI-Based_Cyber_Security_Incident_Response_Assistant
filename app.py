@@ -158,6 +158,27 @@ def inject_custom_css():
         }
         .cg-metric .cg-metric-value { font-size: 1.35rem; font-weight: 700; }
         .cg-metric .cg-metric-label { font-size: 0.75rem; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.03em; }
+
+        .cg-timeline { position: relative; margin-left: 0.4rem; padding-left: 1.2rem; border-left: 2px solid rgba(255,255,255,0.15); }
+        .cg-tl-item { position: relative; padding-bottom: 0.9rem; }
+        .cg-tl-item::before {
+            content: ""; position: absolute; left: -1.53rem; top: 0.15rem;
+            width: 10px; height: 10px; border-radius: 50%;
+            background: #4cc9f0; border: 2px solid rgba(255,255,255,0.4);
+        }
+        .cg-tl-time { font-size: 0.75rem; font-weight: 700; color: #8ecae6; letter-spacing: 0.02em; }
+        .cg-tl-event { font-size: 0.9rem; color: #e6edf3; margin-top: 0.05rem; }
+
+        .cg-chip {
+            display: inline-block; padding: 0.3rem 0.65rem; border-radius: 999px;
+            background: rgba(76,201,240,0.14); color: #8ecae6; font-size: 0.8rem;
+            margin: 0.15rem 0.3rem 0.15rem 0; border: 1px solid rgba(76,201,240,0.3);
+        }
+
+        .cg-snapshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.6rem; }
+        .cg-snapshot-cell { border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 0.5rem 0.7rem; }
+        .cg-snapshot-cell .cg-sc-label { font-size: 0.7rem; opacity: 0.65; text-transform: uppercase; letter-spacing: 0.03em; }
+        .cg-snapshot-cell .cg-sc-value { font-size: 0.92rem; font-weight: 600; color: #eafaff; word-break: break-word; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -188,6 +209,51 @@ def render_metric_box(label: str, value):
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_incident_snapshot(kv_fields: dict):
+    """Renders the known important fields pulled out of a structured SOC report."""
+    cells = []
+    for label, aliases in INTERESTING_FIELDS:
+        value = find_field(kv_fields, aliases)
+        if value:
+            cells.append((label, value))
+    if not cells:
+        return False
+    html_cells = "".join(
+        f"""<div class="cg-snapshot-cell">
+                <div class="cg-sc-label">{label}</div>
+                <div class="cg-sc-value">{value}</div>
+            </div>"""
+        for label, value in cells
+    )
+    st.markdown(f'<div class="cg-snapshot-grid">{html_cells}</div>', unsafe_allow_html=True)
+    return True
+
+
+def render_mitre_chips(mitre_counter):
+    if not mitre_counter:
+        return False
+    chips = "".join(
+        f'<span class="cg-chip">🎯 {tid} — {MITRE_TECHNIQUE_NAMES.get(tid, "Technique")} ({count}x)</span>'
+        for tid, count in mitre_counter.most_common(15)
+    )
+    st.markdown(chips, unsafe_allow_html=True)
+    return True
+
+
+def render_attack_timeline(timeline_events):
+    if not timeline_events:
+        return False
+    items = "".join(
+        f"""<div class="cg-tl-item">
+                <div class="cg-tl-time">{t}</div>
+                <div class="cg-tl-event">{event}</div>
+            </div>"""
+        for t, event in timeline_events
+    )
+    st.markdown(f'<div class="cg-timeline">{items}</div>', unsafe_allow_html=True)
+    return True
 
 
 #========SIDEBAR====================
@@ -399,6 +465,47 @@ _EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _HASH_REGEX = re.compile(r"\b[a-fA-F0-9]{64}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{32}\b")
 _CVE_REGEX = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 _PORT_REGEX = re.compile(r"\bport[:\s]+(\d{1,5})\b", re.IGNORECASE)
+_MITRE_REGEX = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
+_TIME_DASH_LINE = re.compile(r"^(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–—]\s*(.+)$")
+_TIME_ONLY_LINE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+
+# A short lookup of common MITRE ATT&CK technique IDs -> readable names, so
+# the dashboard can show "T1566 - Phishing" instead of a bare code. Falls
+# back to a generic label for anything not in this list.
+MITRE_TECHNIQUE_NAMES = {
+    "T1566": "Phishing", "T1566.001": "Spearphishing Attachment",
+    "T1059": "Command and Scripting Interpreter", "T1059.001": "PowerShell",
+    "T1003": "OS Credential Dumping", "T1041": "Exfiltration Over C2 Channel",
+    "T1547": "Boot or Logon Autostart Execution", "T1547.001": "Registry Run Keys",
+    "T1071": "Application Layer Protocol", "T1071.001": "Web Protocols",
+    "T1105": "Ingress Tool Transfer", "T1053": "Scheduled Task/Job",
+    "T1027": "Obfuscated Files or Information", "T1486": "Data Encrypted for Impact",
+    "T1078": "Valid Accounts", "T1190": "Exploit Public-Facing Application",
+    "T1110": "Brute Force", "T1021": "Remote Services", "T1082": "System Information Discovery",
+    "T1204": "User Execution", "T1055": "Process Injection",
+}
+
+# Fields worth surfacing as an "Incident Snapshot" card when a structured
+# report (Label:\nValue style, like a typical SOC incident report) is
+# uploaded. Matching is case-insensitive substring against the parsed key.
+INTERESTING_FIELDS = [
+    ("Incident ID", ["incident id"]),
+    ("Organization", ["organization", "organisation"]),
+    ("Classification", ["classification"]),
+    ("Overall Severity", ["overall severity"]),
+    ("Hostname", ["hostname"]),
+    ("Department", ["department"]),
+    ("Username", ["username", "user name"]),
+    ("Source IP", ["source ip"]),
+    ("Destination IP", ["destination ip"]),
+    ("Protocol", ["protocol"]),
+    ("Destination Port", ["destination port"]),
+    ("Country", ["country"]),
+    ("Detection Name", ["detection name"]),
+    ("Multi-Factor Authentication", ["multi-factor authentication", "mfa"]),
+    ("Threat Actor", ["threat actor"]),
+    ("Bytes Uploaded", ["bytes uploaded", "bytes exfiltrated"]),
+]
 
 
 def is_private_ip(ip: str) -> bool:
@@ -421,8 +528,83 @@ def is_private_ip(ip: str) -> bool:
     return False
 
 
+def extract_key_value_fields(text: str) -> dict:
+    """
+    Parses "Label:\\nValue" style lines - the common pattern in structured
+    SOC / incident report templates (e.g. "Hostname:\\nFINANCE-PC-07") -
+    into a flat dict so the dashboard can show a real Incident Snapshot
+    instead of just a document count.
+    """
+    lines = [l.strip() for l in text.splitlines()]
+    fields = {}
+    i = 0
+    while i < len(lines) - 1:
+        line = lines[i]
+        if line and line.endswith(":") and 2 <= len(line) <= 60 and not line.startswith("="):
+            key = line[:-1].strip()
+            j = i + 1
+            while j < len(lines) and lines[j] == "":
+                j += 1
+            if j < len(lines):
+                value = lines[j]
+                if value and not value.startswith("=") and not value.endswith(":") and len(value) <= 120:
+                    fields.setdefault(key, value)
+            i = j
+        else:
+            i += 1
+    return fields
+
+
+def find_field(kv: dict, aliases: list):
+    """Case-insensitive substring lookup of a canonical field in the parsed kv dict."""
+    for k, v in kv.items():
+        kl = k.lower()
+        for alias in aliases:
+            if alias == kl or alias in kl:
+                return v
+    return None
+
+
+def extract_timeline(text: str) -> list:
+    """
+    Extracts chronological (time, event) pairs from two common log styles:
+      "08:51:12 - Failed Login"          (same line)
+      "08:40\\nPhishing email delivered"  (time alone, description on next line)
+    Returns a list of (time_str, event_text) in the order found.
+    """
+    lines = [l.strip() for l in text.splitlines()]
+    events = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line:
+            i += 1
+            continue
+        dash_match = _TIME_DASH_LINE.match(line)
+        if dash_match:
+            events.append((dash_match.group(1), dash_match.group(2).strip()))
+            i += 1
+            continue
+        if _TIME_ONLY_LINE.match(line):
+            j = i + 1
+            while j < len(lines) and lines[j] == "":
+                j += 1
+            if (
+                j < len(lines) and lines[j]
+                and not lines[j].startswith("=")
+                and not _TIME_ONLY_LINE.match(lines[j])
+                and not _TIME_DASH_LINE.match(lines[j])
+                and len(lines[j]) <= 120
+            ):
+                events.append((line, lines[j]))
+                i = j + 1
+                continue
+        i += 1
+    return events[:40]
+
+
 def extract_iocs(text: str) -> dict:
-    """Scans raw knowledge-base text and returns Counters of real indicators found."""
+    """Scans raw knowledge-base text and returns Counters/lists of real indicators found."""
     ip_counter = Counter(_IP_REGEX.findall(text))
     external_ips = {ip for ip in ip_counter if not is_private_ip(ip)}
     internal_ips = {ip for ip in ip_counter if is_private_ip(ip)}
@@ -436,6 +618,9 @@ def extract_iocs(text: str) -> dict:
         "hash_counter": Counter(_HASH_REGEX.findall(text)),
         "cve_counter": Counter(m.upper() for m in _CVE_REGEX.findall(text)),
         "port_counter": Counter(_PORT_REGEX.findall(text)),
+        "mitre_counter": Counter(_MITRE_REGEX.findall(text)),
+        "kv_fields": extract_key_value_fields(text),
+        "timeline": extract_timeline(text),
     }
 
 
@@ -599,13 +784,99 @@ def answer_question(question, context, llm):
 
 
 #========PDF REPORT GENERATION (REPORTLAB)====================
+from reportlab.platypus import Table, TableStyle
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.barcharts import VerticalBarChart
 
-def build_pdf_report(sections, incident_description, file_names):
+
+def build_ioc_bar_chart(iocs: dict) -> Drawing:
+    """Native ReportLab vector bar chart (no matplotlib needed) summarizing IOC counts."""
+    labels = ["IPs", "Ext. IPs", "Domains", "Hashes", "CVEs", "MITRE"]
+    values = [
+        len(iocs.get("ip_counter", {})),
+        len(iocs.get("external_ips", [])),
+        len(iocs.get("url_counter", {})),
+        len(iocs.get("hash_counter", {})),
+        len(iocs.get("cve_counter", {})),
+        len(iocs.get("mitre_counter", {})),
+    ]
+    drawing = Drawing(430, 170)
+    chart = VerticalBarChart()
+    chart.x, chart.y = 40, 25
+    chart.width, chart.height = 370, 120
+    chart.data = [values]
+    chart.categoryAxis.categoryNames = labels
+    chart.categoryAxis.labels.fontSize = 8
+    chart.valueAxis.valueMin = 0
+    chart.bars[0].fillColor = colors.HexColor("#0f4c81")
+    chart.barWidth = 12
+    drawing.add(chart)
+    return drawing
+
+
+def build_ioc_table(iocs: dict, styles) -> Table:
+    """Structured Type/Value/Count table of the top indicators - a real visual, not prose."""
+    cell_style = ParagraphStyle("IOCCell", parent=styles["BodyText"], fontSize=8, leading=10, wordWrap="CJK")
+    header = ["Type", "Value", "Mentions"]
+    rows = [header]
+
+    def add_rows(kind, counter, limit=5):
+        for value, count in counter.most_common(limit):
+            rows.append([kind, Paragraph(str(value), cell_style), str(count)])
+
+    add_rows("IP Address", iocs.get("ip_counter", Counter()))
+    add_rows("CVE", iocs.get("cve_counter", Counter()))
+    add_rows("File Hash", iocs.get("hash_counter", Counter()), limit=3)
+    add_rows("Domain/URL", iocs.get("url_counter", Counter()), limit=3)
+    add_rows("MITRE Technique", iocs.get("mitre_counter", Counter()), limit=5)
+
+    if len(rows) == 1:
+        return None
+
+    table = Table(rows, colWidths=[100, 260, 70], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f4c81")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#eef3f8")]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#c9d6e2")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def build_timeline_table(timeline_events, styles) -> Table:
+    """Chronological attack timeline as a colored table - a real visual for the PDF."""
+    if not timeline_events:
+        return None
+    cell_style = ParagraphStyle("TLCell", parent=styles["BodyText"], fontSize=8, leading=10, wordWrap="CJK")
+    rows = [["Time", "Event"]] + [[t, Paragraph(e, cell_style)] for t, e in timeline_events[:20]]
+    table = Table(rows, colWidths=[70, 360], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f4c81")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#eef3f8")]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#c9d6e2")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def build_pdf_report(sections, incident_description, file_names, iocs=None):
     """
     Builds a downloadable PDF incident report using ReportLab.
     Includes: Project Name, Date, Summary, Findings, Recommendations,
-    and a Footer, as required by the project spec.
+    an Incident Snapshot table, an IOC table, a native bar chart, an
+    attack timeline table, and a Footer.
     """
+    iocs = iocs or {}
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=0.8 * inch, bottomMargin=0.8 * inch)
     styles = getSampleStyleSheet()
@@ -636,6 +907,28 @@ def build_pdf_report(sections, incident_description, file_names):
         story.append(Paragraph(f"Incident Description: {incident_description}", body_style))
     story.append(Spacer(1, 12))
 
+    # ---- Incident Snapshot (from parsed report fields) ----
+    kv_fields = iocs.get("kv_fields", {})
+    snapshot_rows = []
+    snapshot_cell_style = ParagraphStyle("SnapCell", parent=styles["BodyText"], fontSize=8, leading=10, wordWrap="CJK")
+    for label, aliases in INTERESTING_FIELDS:
+        value = find_field(kv_fields, aliases)
+        if value:
+            snapshot_rows.append([label, Paragraph(value, snapshot_cell_style)])
+    if snapshot_rows:
+        story.append(Paragraph("Incident Snapshot", heading_style))
+        snap_table = Table(snapshot_rows, colWidths=[150, 280])
+        snap_table.setStyle(TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.white, colors.HexColor("#eef3f8")]),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#c9d6e2")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(snap_table)
+        story.append(Spacer(1, 10))
+
     # ---- Summary ----
     story.append(Paragraph("Summary", heading_style))
     story.append(Paragraph(sections.get("Incident Summary", "Not available."), body_style))
@@ -646,6 +939,23 @@ def build_pdf_report(sections, incident_description, file_names):
     for label in findings_map:
         story.append(Paragraph(f"<b>{label}:</b> {sections.get(label, 'Not available.')}", body_style))
         story.append(Spacer(1, 4))
+
+    # ---- Indicators of Compromise (table visual) ----
+    ioc_table = build_ioc_table(iocs, styles)
+    if ioc_table:
+        story.append(Paragraph("Indicators of Compromise", heading_style))
+        story.append(ioc_table)
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("IOC Category Counts", heading_style))
+        story.append(build_ioc_bar_chart(iocs))
+        story.append(Spacer(1, 6))
+
+    # ---- Attack Timeline (table visual) ----
+    timeline_table = build_timeline_table(iocs.get("timeline", []), styles)
+    if timeline_table:
+        story.append(Paragraph("Attack Timeline", heading_style))
+        story.append(timeline_table)
+        story.append(Spacer(1, 10))
 
     # ---- Recommendations ----
     story.append(Paragraph("Recommendations", heading_style))
@@ -736,6 +1046,12 @@ with tab_dashboard:
                 st.caption(f"🕒 Last updated: {st.session_state.kb_last_updated.strftime('%d %b %Y, %H:%M')}")
 
     st.divider()
+    st.markdown("**🧾 Incident Snapshot** _(key fields parsed from your uploaded report)_")
+    snapshot_shown = render_incident_snapshot(st.session_state.iocs.get("kv_fields", {})) if st.session_state.iocs else False
+    if not snapshot_shown:
+        st.caption("Upload a structured report (with labeled fields like Hostname, Source IP, Country...) to populate this.")
+
+    st.divider()
     st.markdown("**🛰️ Live Threat Telemetry** _(extracted directly from your knowledge base — no extra API calls)_")
 
     iocs = st.session_state.iocs
@@ -788,6 +1104,17 @@ with tab_dashboard:
             if iocs["port_counter"]:
                 st.markdown("**Ports Referenced**")
                 st.write(", ".join(f"`{p}`" for p, _ in iocs["port_counter"].most_common(10)))
+
+        if iocs.get("mitre_counter"):
+            st.write("")
+            st.markdown("**🎯 MITRE ATT&CK Techniques Observed**")
+            render_mitre_chips(iocs["mitre_counter"])
+
+        if iocs.get("timeline"):
+            st.write("")
+            st.markdown("**🕓 Attack Timeline** _(chronological events found in the knowledge base)_")
+            with st.container(border=True):
+                render_attack_timeline(iocs["timeline"])
 
     st.divider()
     st.markdown("**🕘 Recent Incident Analyses**")
@@ -896,6 +1223,7 @@ with tab_analysis:
                 result,
                 st.session_state.incident_description,
                 st.session_state.uploaded_file_names,
+                st.session_state.iocs,
             )
             st.download_button(
                 label="📥 Download PDF Report",
