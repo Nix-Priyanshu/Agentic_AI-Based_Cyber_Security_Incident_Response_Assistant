@@ -1,9 +1,5 @@
-streamlit>=1.38.0
-langchain-core>=0.3.0
-langchain-community>=0.3.0
-langchain-text-splitters>=0.3.0
-langchain-google-genai>=2.0.0
-langchain-groq>=0.2.0
-faiss-cpu>=1.8.0
-reportlab>=4.2.0
-pypdf>=4.3.0
+streamlit>=1.35
+requests>=2.31
+pandas>=2.0
+fastapi>=0.110
+uvicorn>=0.29
